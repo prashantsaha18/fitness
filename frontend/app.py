@@ -20,7 +20,7 @@ import streamlit as st
 
 from frontend.components.theme import (
     AMBER, BLUE, ELECTRIC, EMERALD, FLAME, NEON_GREEN, PURPLE, RED,
-    TEXT_MUTED, WORKOUT_ICONS,
+    TEXT_MUTED, WORKOUT_ICONS, DARK_BG, CARD_BG, BORDER, TEXT_DIM,
     alert, apply_theme, hero, metric_card, section,
 )
 from frontend.components.charts import make_hr_chart, make_gauge, make_radar
