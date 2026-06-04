@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets — NEVER commit these
+.env
+.streamlit/secrets.toml
+
+# data/kaggle_raw/ intentionally committed (pre-baked CSVs ~1.8MB)
+# data/kaggle_raw/
+data/*.npy
+
+# artifacts/ intentionally committed (pre-baked for Streamlit Cloud cold-start)
+# artifacts/*.pt
+# artifacts/*.onnx
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Benchmark output
+benchmark_report.json
+runs/

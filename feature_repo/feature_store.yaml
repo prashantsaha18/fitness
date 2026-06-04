@@ -1,0 +1,43 @@
+# feature_repo/feature_store.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Feast Feature Store Configuration
+#
+# Architectural split:
+#   offline_store → PostgreSQL (NeonDB) — historical batch features,
+#                   30-day aggregation windows, training dataset generation
+#   online_store  → Redis — sub-millisecond feature retrieval at serving time
+#
+# This separation is the primary mechanism for eliminating Training-Serving Skew:
+#   Training uses offline_store snapshots; serving uses online_store live values.
+#   Both are populated by the SAME feature definitions (definitions.py),
+#   guaranteeing semantic consistency between training and inference pipelines.
+# ─────────────────────────────────────────────────────────────────────────────
+
+project: fitness_rec_engine
+provider: local
+
+registry:
+  registry_type: sql
+  path: postgresql://neondb_owner:npg_JqDQtgWVE3C2@ep-young-frost-aq03fhnr.c-8.us-east-1.aws.neon.tech/neondb?sslmode=require
+  cache_ttl_seconds: 600
+
+offline_store:
+  type: file
+  # In production: swap to postgres for full SQL push-down support
+  # type: postgres
+  # host: ep-young-frost-aq03fhnr.c-8.us-east-1.aws.neon.tech
+  # port: 5432
+  # database: neondb
+  # user: neondb_owner
+  # password: npg_JqDQtgWVE3C2
+
+online_store:
+  type: redis
+  connection_string: "localhost:6379"
+  key_ttl_seconds: 300
+
+entity_key_serialization_version: 2
+
+flags:
+  alpha_features: true
+  on_demand_transforms: true

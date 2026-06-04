@@ -1,0 +1,235 @@
+# monitoring/prometheus_rules.yaml
+# ────────────────────────────────────────────────────────────────────────────
+# Prometheus Alerting Rules — Fitness Recommendation Engine
+#
+# Alert severity tiers:
+#   critical → PagerDuty page immediately (SLA breach imminent)
+#   warning  → Slack notification (trend to investigate)
+#   info     → Dashboard annotation only
+#
+# Runbook links point to internal wiki. Replace with your documentation URL.
+# ────────────────────────────────────────────────────────────────────────────
+
+groups:
+  # ── Latency Alerts ──────────────────────────────────────────────────────────
+  - name: recommendation_latency
+    interval: 30s
+    rules:
+
+      - alert: RecommendationP99LatencyBreach
+        expr: |
+          histogram_quantile(0.99,
+            rate(recommendation_latency_ms_bucket[5m])
+          ) > 35
+        for: 1m
+        labels:
+          severity: critical
+          team: recommendations
+        annotations:
+          summary: "P99 recommendation latency exceeds 35ms SLA"
+          description: |
+            P99 latency is {{ $value | humanizeDuration }}ms over the past 5 minutes.
+            SLA threshold: 35ms. Immediate investigation required.
+            Check: Qdrant HNSW ef_search, Redis pool saturation, ONNX thread contention.
+          runbook: "https://wiki.internal/runbooks/rec-engine-latency"
+
+      - alert: RecommendationP95LatencyWarning
+        expr: |
+          histogram_quantile(0.95,
+            rate(recommendation_latency_ms_bucket[5m])
+          ) > 25
+        for: 3m
+        labels:
+          severity: warning
+          team: recommendations
+        annotations:
+          summary: "P95 recommendation latency elevated (>25ms)"
+          description: |
+            P95 latency is {{ $value }}ms. Not yet a breach but trending toward SLA violation.
+            Investigate within 15 minutes.
+
+      - alert: RecommendationMedianLatencyHigh
+        expr: |
+          histogram_quantile(0.50,
+            rate(recommendation_latency_ms_bucket[5m])
+          ) > 15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Median recommendation latency above 15ms"
+          description: "Median latency {{ $value }}ms. System under unexpected load."
+
+  # ── Error Rate Alerts ────────────────────────────────────────────────────────
+  - name: recommendation_errors
+    interval: 30s
+    rules:
+
+      - alert: HighErrorRate
+        expr: |
+          (
+            rate(recommendation_requests_total{status=~"5.."}[5m])
+            /
+            rate(recommendation_requests_total[5m])
+          ) > 0.01
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Recommendation error rate exceeds 1%"
+          description: "Error rate: {{ $value | humanizePercentage }}. Check API logs."
+
+      - alert: AuthFailureSpike
+        expr: |
+          rate(recommendation_requests_total{status="401"}[5m]) > 50
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Spike in 401 Unauthorized responses"
+          description: |
+            {{ $value }} auth failures/sec. Possible credential stuffing attack or
+            client-side JWT expiry bug.
+
+  # ── Fallback Rate Alerts ─────────────────────────────────────────────────────
+  - name: fallback_mode
+    interval: 30s
+    rules:
+
+      - alert: FallbackRateCritical
+        expr: |
+          (
+            rate(recommendation_fallback_total[5m])
+            /
+            rate(recommendation_requests_total[5m])
+          ) > 0.05
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: ">5% of recommendations served from fallback cache"
+          description: |
+            Fallback rate: {{ $value | humanizePercentage }}.
+            Qdrant or embedding service is likely degraded.
+            Users are receiving non-personalised recommendations.
+          runbook: "https://wiki.internal/runbooks/rec-engine-fallback"
+
+      - alert: FallbackRateWarning
+        expr: |
+          (
+            rate(recommendation_fallback_total[5m])
+            /
+            rate(recommendation_requests_total[5m])
+          ) > 0.001
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: ">0.1% of recommendations in fallback mode"
+          description: "Fallback rate {{ $value | humanizePercentage }}. Investigate Qdrant health."
+
+  # ── Infrastructure Alerts ────────────────────────────────────────────────────
+  - name: infrastructure
+    interval: 15s
+    rules:
+
+      - alert: QdrantDown
+        expr: up{job="qdrant"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Qdrant vector database is unreachable"
+          description: |
+            Qdrant has been down for >30 seconds. All recommendations are being
+            served from fallback cache. HNSW index is unavailable.
+            Action: restart Qdrant pod, verify storage volume is healthy.
+
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is unreachable"
+          description: |
+            Redis down for >30s. Online feature fetches will fail.
+            Cold-start features are being used. Fallback cache is unavailable.
+
+      - alert: RedisMemoryPressure
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis memory usage >85%"
+          description: |
+            Redis using {{ $value | humanizePercentage }} of max memory.
+            LRU eviction will begin affecting feature cache hit rates.
+            Consider increasing maxmemory or reducing TTLs.
+
+      - alert: QdrantDiskPressure
+        expr: |
+          (
+            node_filesystem_avail_bytes{mountpoint="/qdrant/storage"}
+            /
+            node_filesystem_size_bytes{mountpoint="/qdrant/storage"}
+          ) < 0.15
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Qdrant storage volume <15% free"
+          description: "Only {{ $value | humanizePercentage }} disk free. Index growth may cause issues."
+
+  # ── Throughput Alerts ────────────────────────────────────────────────────────
+  - name: throughput
+    interval: 60s
+    rules:
+
+      - alert: ThroughputDropSignificant
+        expr: |
+          (
+            rate(recommendation_requests_total[5m])
+            /
+            rate(recommendation_requests_total[5m] offset 1h)
+          ) < 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Recommendation throughput dropped >50% vs 1h ago"
+          description: |
+            Current RPS is {{ $value | humanizePercentage }} of 1-hour-ago level.
+            Possible API deployment issue, load balancer misconfiguration, or upstream client change.
+
+      - alert: ThroughputAboveCapacity
+        expr: rate(recommendation_requests_total[1m]) > 6000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Request rate exceeds 6,000 RPS (120% of designed capacity)"
+          description: |
+            Current RPS: {{ $value }}. Designed capacity: 5,000 RPS.
+            Consider scaling API replicas or enabling request queuing.
+
+  # ── Model Quality Alerts ─────────────────────────────────────────────────────
+  - name: model_quality
+    interval: 300s   # check every 5 minutes
+    rules:
+
+      - alert: ONNXInferenceSlowdown
+        expr: |
+          histogram_quantile(0.99,
+            rate(onnx_inference_latency_ms_bucket[10m])
+          ) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ONNX inference P99 exceeds 10ms"
+          description: |
+            Stage-2 inference taking {{ $value }}ms at P99.
+            Budget is 15ms. May indicate CPU contention or model regression.
+            Check: intra_op thread count, concurrent requests, batch size.

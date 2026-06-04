@@ -1,0 +1,21 @@
+# ── Core Streamlit frontend ───────────────────────────────────────────────────
+streamlit==1.35.0
+plotly==5.22.0
+
+# ── ML — CPU-only torch (saves ~600MB vs CUDA wheel) ─────────────────────────
+# Streamlit Cloud has no GPU; CPU wheel is sufficient for inference.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.0+cpu
+
+# ── Numerical / ML ────────────────────────────────────────────────────────────
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.5.0
+scipy==1.13.1
+
+# ── ONNX inference ────────────────────────────────────────────────────────────
+onnx==1.16.0
+onnxruntime==1.18.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv==1.0.1

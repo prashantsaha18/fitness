@@ -1,0 +1,432 @@
+# .github/workflows/ci.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# CI/CD Pipeline — Fitness Recommendation Engine
+#
+# Pipeline stages:
+#   1. lint       — ruff + mypy (strict) + black check
+#   2. test-unit  — pytest unit tests with coverage (no I/O, fast ~30s)
+#   3. test-integration — pytest integration tests with mocked services (~60s)
+#   4. security   — bandit (code) + pip-audit (dependencies) + trivy (image)
+#   5. build      — Docker multi-stage build + tag + push to ECR
+#   6. deploy-staging — Helm upgrade to staging cluster (auto on PR merge)
+#   7. smoke-test — 60s load test at 100 RPS against staging
+#   8. deploy-prod — Helm upgrade to production (manual approval required)
+#
+# Latency gate:
+#   smoke-test step runs benchmark.py and fails if P99 > 35ms or error rate > 0.1%
+#   This prevents latency regressions from reaching production.
+#
+# Feature flag:
+#   New model versions are deployed behind ONNX_MODEL_PATH env var.
+#   A/B test framework handles traffic splitting after deployment.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy_environment:
+        description: "Deploy to environment"
+        required: true
+        default: "staging"
+        type: choice
+        options: [staging, production]
+
+env:
+  PYTHON_VERSION: "3.11"
+  REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+  IMAGE_NAME: fitness-rec-engine
+  HELM_RELEASE: fitness-rec-engine
+  K8S_NAMESPACE: recommendations
+
+jobs:
+  # ── 1. Lint & Type Check ──────────────────────────────────────────────────
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install lint dependencies
+        run: |
+          pip install ruff==0.4.4 black==24.4.2 mypy==1.10.0 \
+            types-redis types-python-jose types-passlib
+
+      - name: Run ruff (fast linter — replaces flake8, isort, pyupgrade)
+        run: |
+          ruff check . --select=E,F,W,I,N,UP,B,S --ignore=S101,S311 \
+            --exclude=migrations,scripts/seed_data.py
+
+      - name: Run black (format check)
+        run: black --check --diff .
+
+      - name: Run mypy (strict type checking)
+        run: |
+          mypy api/ ranking/ retrieval/ config/ data_pipeline/ \
+            --ignore-missing-imports \
+            --strict \
+            --allow-untyped-decorators \
+            --exclude migrations
+        continue-on-error: true   # type errors are warnings in this phase
+
+
+  # ── 2. Unit Tests ─────────────────────────────────────────────────────────
+  test-unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov hypothesis scipy
+
+      - name: Run unit tests with coverage
+        run: |
+          pytest tests/unit/ \
+            --cov=ranking --cov=retrieval --cov=api --cov=config \
+            --cov-report=xml --cov-report=term-missing \
+            --cov-fail-under=80 \
+            -v \
+            --tb=short \
+            --timeout=30 \
+            -x   # stop on first failure
+        env:
+          DATABASE_URL: "postgresql+asyncpg://user:pass@localhost/test"
+          JWT_SECRET_KEY: "test_secret_key_for_ci_only_not_production"
+          REDIS_URL: "redis://localhost:6379/0"
+          QDRANT_HOST: "localhost"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          flags: unit-tests
+          fail_ci_if_error: false
+
+
+  # ── 3. Integration Tests ──────────────────────────────────────────────────
+  test-integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio httpx fakeredis
+
+      - name: Run integration tests
+        run: |
+          pytest tests/integration/ \
+            -v \
+            --tb=short \
+            --timeout=60 \
+            --asyncio-mode=auto
+        env:
+          DATABASE_URL: "postgresql+asyncpg://user:pass@localhost/test"
+          JWT_SECRET_KEY: "test_secret_key_for_ci_only_not_production"
+          REDIS_URL: "redis://localhost:6379/0"
+
+
+  # ── 4. Security Scanning ──────────────────────────────────────────────────
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install security tools
+        run: pip install bandit pip-audit
+
+      - name: Run bandit (SAST — security issues in Python code)
+        run: |
+          bandit -r api/ ranking/ retrieval/ config/ data_pipeline/ \
+            --skip B101,B311 \
+            --severity-level medium \
+            --confidence-level medium \
+            -f json -o bandit_report.json || true
+          cat bandit_report.json | python -c "
+          import json,sys
+          r = json.load(open('bandit_report.json'))
+          highs = [i for i in r.get('results',[]) if i['issue_severity']=='HIGH']
+          if highs:
+              print(f'FAILED: {len(highs)} HIGH severity issues')
+              for h in highs: print(f'  {h[\"filename\"]}:{h[\"line_number\"]} - {h[\"issue_text\"]}')
+              sys.exit(1)
+          print(f'PASSED: No HIGH severity issues')
+          "
+
+      - name: Run pip-audit (dependency vulnerability scan)
+        run: |
+          pip-audit -r requirements.txt \
+            --format=json \
+            --output=pip_audit_report.json || true
+          python -c "
+          import json,sys
+          r = json.load(open('pip_audit_report.json'))
+          vulns = [d for d in r.get('dependencies',[]) if d.get('vulns')]
+          critical = [v for d in vulns for v in d['vulns'] if 'critical' in str(v).lower()]
+          if critical:
+              print(f'FAILED: {len(critical)} CRITICAL vulnerabilities found')
+              sys.exit(1)
+          print(f'PASSED: No critical vulnerabilities ({len(vulns)} packages with lower-severity issues)')
+          "
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: |
+            bandit_report.json
+            pip_audit_report.json
+
+
+  # ── 5. Build & Push Docker Image ──────────────────────────────────────────
+  build:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [lint, test-unit, test-integration, security]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      image_digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Extract Docker metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+
+      - name: Run Trivy vulnerability scan on built image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+          severity: CRITICAL
+
+
+  # ── 6. Deploy to Staging ──────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy → Staging
+    runs-on: ubuntu-latest
+    needs: [build]
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set up kubectl
+        uses: aws-actions/amazon-eks-action@v1
+        with:
+          cluster-name: ${{ secrets.EKS_CLUSTER_NAME }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Deploy via Helm
+        run: |
+          helm upgrade --install ${{ env.HELM_RELEASE }} ./helm/fitness-rec-engine \
+            --namespace ${{ env.K8S_NAMESPACE }} \
+            --create-namespace \
+            --set image.tag=sha-${{ github.sha }} \
+            --set image.registry=${{ env.REGISTRY }} \
+            --set replicaCount=2 \
+            --set resources.requests.cpu=2 \
+            --set resources.requests.memory=4Gi \
+            --set resources.limits.cpu=4 \
+            --set resources.limits.memory=8Gi \
+            --set env.DATABASE_URL="${{ secrets.STAGING_DATABASE_URL }}" \
+            --set env.REDIS_URL="${{ secrets.STAGING_REDIS_URL }}" \
+            --set env.QDRANT_HOST="${{ secrets.STAGING_QDRANT_HOST }}" \
+            --set env.JWT_SECRET_KEY="${{ secrets.STAGING_JWT_SECRET }}" \
+            --set env.ENV=staging \
+            --wait \
+            --timeout=300s
+
+      - name: Verify deployment rollout
+        run: |
+          kubectl rollout status deployment/${{ env.HELM_RELEASE }} \
+            -n ${{ env.K8S_NAMESPACE }} \
+            --timeout=120s
+
+
+  # ── 7. Smoke Test (Latency Gate) ──────────────────────────────────────────
+  smoke-test:
+    name: Smoke Test — Latency Gate
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install benchmark dependencies
+        run: pip install httpx[http2] numpy
+
+      - name: Run 60-second load test at 200 RPS
+        run: |
+          python scripts/benchmark.py \
+            --url ${{ secrets.STAGING_API_URL }} \
+            --rps 200 \
+            --duration 60 \
+            --warmup 15
+        env:
+          BENCHMARK_STAGING: "true"
+
+      - name: Validate SLA compliance
+        run: |
+          python -c "
+          import json, sys
+          report = json.load(open('benchmark_report.json'))
+          sla = report['sla_compliance']
+          failures = [k for k, v in sla.items() if not v]
+          if failures:
+              print(f'LATENCY GATE FAILED: {failures}')
+              lat = report['latency_ms']
+              print(f'  P99={lat[\"p99\"]}ms  P95={lat[\"p95\"]}ms')
+              sys.exit(1)
+          print(f'LATENCY GATE PASSED ✅')
+          print(f'  P99={report[\"latency_ms\"][\"p99\"]}ms  RPS={report[\"summary\"][\"actual_rps\"]}')
+          "
+
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-report-staging
+          path: benchmark_report.json
+
+
+  # ── 8. Deploy to Production (Manual Approval) ─────────────────────────────
+  deploy-production:
+    name: Deploy → Production
+    runs-on: ubuntu-latest
+    needs: [smoke-test]
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: ${{ secrets.PROD_API_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set up kubectl (production cluster)
+        uses: aws-actions/amazon-eks-action@v1
+        with:
+          cluster-name: ${{ secrets.PROD_EKS_CLUSTER_NAME }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Deploy to Production (Canary: 10% traffic)
+        run: |
+          helm upgrade --install ${{ env.HELM_RELEASE }} ./helm/fitness-rec-engine \
+            --namespace ${{ env.K8S_NAMESPACE }} \
+            --set image.tag=sha-${{ github.sha }} \
+            --set image.registry=${{ env.REGISTRY }} \
+            --set replicaCount=4 \
+            --set canary.enabled=true \
+            --set canary.weight=10 \
+            --set resources.requests.cpu=4 \
+            --set resources.requests.memory=8Gi \
+            --set resources.limits.cpu=8 \
+            --set resources.limits.memory=16Gi \
+            --set env.DATABASE_URL="${{ secrets.PROD_DATABASE_URL }}" \
+            --set env.REDIS_URL="${{ secrets.PROD_REDIS_URL }}" \
+            --set env.QDRANT_HOST="${{ secrets.PROD_QDRANT_HOST }}" \
+            --set env.JWT_SECRET_KEY="${{ secrets.PROD_JWT_SECRET }}" \
+            --set env.ENV=production \
+            --wait \
+            --timeout=600s
+
+      - name: Notify deployment success
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "✅ *fitness-rec-engine* deployed to production\n*SHA:* `${{ github.sha }}`\n*Actor:* ${{ github.actor }}\n*Canary:* 10% traffic",
+              "channel": "#deployments"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        if: success()
