@@ -16,25 +16,30 @@ from frontend.components.theme import (
     apply_theme, hero, section, alert, metric_card,
 )
 from frontend.components.charts import make_bar, make_line, plotly_layout
+from frontend.components.db_utils import init_session_state_defaults, render_db_user_selector
 
 st.set_page_config(page_title="Nutrition · FitAI", page_icon="🥗", layout="wide")
 apply_theme()
+init_session_state_defaults()
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
+    render_db_user_selector()
+    st.divider()
+
     st.markdown("### 🥗 Nutrition Settings")
-    age      = st.slider("Age", 18, 70, 28)
-    weight   = st.slider("Weight (kg)", 45, 140, 74)
-    height   = st.slider("Height (cm)", 150, 210, 178)
+    age      = st.slider("Age", 18, 70, key="age")
+    weight   = st.slider("Weight (kg)", 45, 140, key="weight")
+    height   = st.slider("Height (cm)", 150, 210, key="height_cm")
     gender   = st.selectbox("Gender", ["Male", "Female"])
-    goal     = st.selectbox("Goal", ["Weight Loss", "Muscle Gain", "Maintenance", "Endurance"])
+    goal     = st.selectbox("Goal", ["Weight Loss", "Muscle Gain", "Maintenance", "Endurance", "Flexibility"], key="goal")
     activity = st.selectbox(
         "Activity Level",
         ["Sedentary", "Lightly Active", "Moderately Active", "Very Active", "Extremely Active"],
     )
     st.divider()
-    htn   = st.toggle("Hypertension", False)
-    diab  = st.toggle("Diabetes",     False)
+    htn   = st.toggle("Hypertension", key="htn")
+    diab  = st.toggle("Diabetes",     key="diabetes")
     vegan = st.toggle("Vegan",        False)
 
 # ── TDEE (Mifflin-St Jeor) ────────────────────────────────────────────────────
@@ -43,7 +48,7 @@ act = {"Sedentary": 1.2, "Lightly Active": 1.375, "Moderately Active": 1.55,
        "Very Active": 1.725, "Extremely Active": 1.9}[activity]
 tdee       = int(bmr * act)
 cal_target = {"Weight Loss": int(tdee * 0.80), "Muscle Gain": int(tdee * 1.12),
-              "Maintenance": tdee, "Endurance": int(tdee * 1.05)}[goal]
+              "Maintenance": tdee, "Endurance": int(tdee * 1.05), "Flexibility": int(tdee * 0.95)}[goal]
 protein_g  = int(weight * (2.0 if goal == "Muscle Gain" else 1.6))
 fat_g      = int(cal_target * 0.28 / 9)
 carb_g     = int((cal_target - protein_g * 4 - fat_g * 9) / 4)
@@ -150,6 +155,7 @@ with right:
         "Muscle Gain":  [1, 2, 5, 6],
         "Maintenance":  [0, 2, 4, 7],
         "Endurance":    [0, 3, 4, 6],
+        "Flexibility":  [0, 2, 4, 7],
     }
     idxs  = GOAL_MEALS[goal]
     meals = [m for m in [ALL_MEALS[i] for i in idxs]

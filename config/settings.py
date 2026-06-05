@@ -101,9 +101,19 @@ class Settings(BaseSettings):
     def _coerce_async_driver(cls, v: str) -> str:
         """Ensure asyncpg driver is always used, regardless of .env format."""
         if v.startswith("postgresql://") or v.startswith("postgres://"):
-            return v.replace("postgresql://", "postgresql+asyncpg://", 1).replace(
+            v = v.replace("postgresql://", "postgresql+asyncpg://", 1).replace(
                 "postgres://", "postgresql+asyncpg://", 1
             )
+        if "?" in v:
+            base, query = v.split("?", 1)
+            params = [
+                p for p in query.split("&")
+                if not p.startswith("sslmode=") and not p.startswith("channel_binding=")
+            ]
+            if params:
+                v = f"{base}?{'&'.join(params)}"
+            else:
+                v = base
         return v
 
 

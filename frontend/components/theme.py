@@ -36,6 +36,7 @@ WORKOUT_COLORS: dict[str, str] = {
     "Yoga":     EMERALD,
     "Cardio":   BLUE,
     "Pilates":  AMBER,
+    "Meal":     NEON_GREEN,
 }
 
 WORKOUT_ICONS: dict[str, str] = {
@@ -44,6 +45,7 @@ WORKOUT_ICONS: dict[str, str] = {
     "Yoga":     "🧘",
     "Cardio":   "🏃",
     "Pilates":  "⚖️",
+    "Meal":     "🥗",
 }
 
 # ── Zone mapping ──────────────────────────────────────────────────────────────

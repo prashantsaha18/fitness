@@ -319,6 +319,30 @@ async def seed_content(session, count: int = 100_000) -> list[str]:
 
     random.shuffle(content_records)
 
+    all_keys = {
+        "id": None,
+        "title": None,
+        "description": None,
+        "content_type": None,
+        "workout_type": None,
+        "duration_minutes": None,
+        "intensity_score": None,
+        "calories_burned_estimate": None,
+        "target_muscle_groups": None,
+        "required_equipment": None,
+        "sodium_mg": None,
+        "calories_kcal": None,
+        "protein_g": None,
+        "carbs_g": None,
+        "fat_g": None,
+        "dietary_tags": None,
+        "global_ctr": 0.0,
+        "global_completion_rate": 0.0,
+        "total_interactions": 0,
+        "is_published": True,
+    }
+    content_records = [{**all_keys, **r} for r in content_records]
+
     BATCH = 1000
     for i in range(0, len(content_records), BATCH):
         batch = content_records[i : i + BATCH]

@@ -25,6 +25,7 @@ from frontend.components.theme import (
 )
 from frontend.components.charts import make_hr_chart, make_gauge, make_radar
 from frontend.components.inference import run_inference
+from frontend.components.db_utils import init_session_state_defaults, render_db_user_selector
 
 # ── Page config ───────────────────────────────────────────────────────────────
 # set_page_config is called by streamlit_app.py when launched via Streamlit
@@ -43,6 +44,7 @@ try:
 except st.errors.StreamlitAPIException:
     pass   # already called by the parent entry-point
 apply_theme()
+init_session_state_defaults()
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 WORKOUT_BADGE: dict[str, str] = {
@@ -51,6 +53,7 @@ WORKOUT_BADGE: dict[str, str] = {
     "Yoga":     "badge-yoga",
     "Cardio":   "badge-cardio",
     "Pilates":  "badge-pilates",
+    "Meal":     "badge-yoga",
 }
 
 CONTENT_POOL: list[dict[str, Any]] = [
@@ -70,7 +73,7 @@ CONTENT_POOL: list[dict[str, Any]] = [
     {"id": "w14", "title": "Tempo Run: Lactate Threshold",         "type": "Cardio",   "duration": 40, "calories": 420, "intensity": 0.78, "level": "Intermediate"},
     {"id": "w15", "title": "Barre Pilates Fusion",                 "type": "Pilates",  "duration": 45, "calories": 220, "intensity": 0.50, "level": "Beginner"},
 ]
-_POOL_JSON = json.dumps(CONTENT_POOL)
+# _POOL_JSON is defined dynamically based on DB pool later in the file.
 
 GOAL_ENC: dict[str, int] = {
     "Weight Loss": 0, "Muscle Gain": 1, "Endurance": 2,
@@ -95,15 +98,7 @@ def _user_state_key(state: dict) -> str:
     return sig
 
 
-# ── Session state defaults ────────────────────────────────────────────────────
-_DEFAULTS: dict[str, Any] = {
-    "hr_history":     [72 + random.randint(-4, 4) for _ in range(30)],
-    "streak":         random.randint(4, 21),
-    "weekly_done":    random.randint(2, 4),
-}
-for k, v in _DEFAULTS.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+# Session state defaults are initialised via init_session_state_defaults() above.
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -122,19 +117,21 @@ with st.sidebar:
     )
     st.divider()
 
+    render_db_user_selector()
+
     st.markdown("### 👤 Profile")
-    name   = st.text_input("Name", value="Alex", label_visibility="collapsed", placeholder="Your name")
-    age    = st.slider("Age", 18, 70, 28)
-    weight = st.slider("Weight (kg)", 45, 140, 74)
-    height_cm = st.slider("Height (cm)", 150, 210, 178)
+    name   = st.text_input("Name", key="name", label_visibility="collapsed", placeholder="Your name")
+    age    = st.slider("Age", 18, 70, key="age")
+    weight = st.slider("Weight (kg)", 45, 140, key="weight")
+    height_cm = st.slider("Height (cm)", 150, 210, key="height_cm")
     bmi    = weight / (height_cm / 100) ** 2
-    goal   = st.selectbox("🎯 Fitness Goal", list(GOAL_ENC))
-    freq   = st.slider("📅 Workouts / week", 1, 7, 4)
+    goal   = st.selectbox("🎯 Fitness Goal", list(GOAL_ENC), key="goal")
+    freq   = st.slider("📅 Workouts / week", 1, 7, key="freq_per_week")
 
     st.markdown("### ⚕️ Health Markers")
-    htn     = st.toggle("Hypertension",  value=False)
-    cardiac = st.toggle("Cardiac Risk",  value=False)
-    diabetes= st.toggle("Diabetes",      value=False)
+    htn     = st.toggle("Hypertension", key="htn")
+    cardiac = st.toggle("Cardiac Risk", key="cardiac")
+    diabetes= st.toggle("Diabetes", key="diabetes")
 
     st.markdown("### 🎮 Live State")
     hr_bpm  = st.slider("❤️ Heart Rate (bpm)", 50, 200, 72)
@@ -173,6 +170,10 @@ user_state: dict[str, Any] = {
     "has_cardiac_risk": cardiac,
     "has_diabetes":     diabetes,
 }
+
+# ── Dynamic Content Pool from Database ──
+content_pool_list = st.session_state.db_pool if st.session_state.db_pool else CONTENT_POOL
+_POOL_JSON = json.dumps(content_pool_list)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TABS

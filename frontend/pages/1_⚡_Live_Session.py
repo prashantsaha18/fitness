@@ -17,9 +17,11 @@ from frontend.components.theme import (
     apply_theme, section,
 )
 from frontend.components.charts import make_hr_chart, make_gauge
+from frontend.components.db_utils import init_session_state_defaults, render_db_user_selector
 
 st.set_page_config(page_title="Live Session · FitAI", page_icon="⚡", layout="wide")
 apply_theme()
+init_session_state_defaults()
 
 # ── Workout definitions ───────────────────────────────────────────────────────
 WORKOUTS: dict[str, dict[str, Any]] = {
@@ -109,10 +111,13 @@ for k, v in _SESS.items():
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
+    render_db_user_selector()
+    st.divider()
+
     st.markdown("### ⚡ Session Setup")
     wt     = st.selectbox("Workout", list(WORKOUTS.keys()))
-    weight = st.slider("Weight (kg)", 45, 140, 74)
-    age    = st.slider("Age", 18, 70, 28)
+    weight = st.slider("Weight (kg)", 45, 140, key="weight")
+    age    = st.slider("Age", 18, 70, key="age")
     st.divider()
     c1, c2 = st.columns(2)
     with c1:
